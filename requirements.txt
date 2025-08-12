@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
 google-ads
+google-auth-oauthlib
 PyYAML
