@@ -120,3 +120,22 @@ def ads_campaigns(
 @app.get("/")
 def root():
     return {"ok": True, "service": "ads-api"}
+
+@app.get("/ads/debug-config")
+def ads_debug_config():
+    import os, yaml
+    p = "/etc/secrets/google-ads.yaml"
+    exists = os.path.exists(p)
+    data = {}
+    if exists:
+        with open(p,"r") as f:
+            data = yaml.safe_load(f) or {}
+    # No devuelvo el token completo por seguridad
+    rt = data.get("refresh_token","")
+    masked = (rt[:6] + "..." + rt[-6:]) if rt else ""
+    return {
+        "path_exists": exists,
+        "keys_present": sorted(list(data.keys())) if data else [],
+        "refresh_token_masked": masked
+    }
+
