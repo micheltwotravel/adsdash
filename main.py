@@ -1,18 +1,37 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
-import yaml
+from google_auth_oauthlib.flow import Flow
+import os, yaml
 
 app = FastAPI()
 
+# ---------- CONFIG ----------
 GOOGLE_ADS_YAML_PATH = "/etc/secrets/google-ads.yaml"
+CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")  # ej: https://adsdash.onrender.com/oauth2/callback
+SCOPES = ["https://www.googleapis.com/auth/adwords"]
+# ----------------------------
+
+def _client_config():
+    if not (CLIENT_ID and CLIENT_SECRET and REDIRECT_URI):
+        raise RuntimeError("Faltan GOOGLE_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI en Render.")
+    return {
+        "web": {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
+        }
+    }
 
 def _ads_client() -> GoogleAdsClient:
     return GoogleAdsClient.load_from_storage(GOOGLE_ADS_YAML_PATH)
 
 def _get_customer_id() -> str:
-    """Lee el customer_id por defecto del YAML."""
     with open(GOOGLE_ADS_YAML_PATH, "r") as fh:
         cfg = yaml.safe_load(fh) or {}
     cid = str(cfg.get("client_customer_id") or cfg.get("login_customer_id") or "").strip()
@@ -20,9 +39,36 @@ def _get_customer_id() -> str:
         raise HTTPException(400, "No se encontró client_customer_id/login_customer_id en google-ads.yaml")
     return cid.replace("-", "")
 
+# ---------- OAuth para obtener refresh_token ----------
+@app.get("/oauth2/start")
+def oauth2_start():
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    return RedirectResponse(auth_url)
+
+@app.get("/oauth2/callback")
+def oauth2_callback(request: Request):
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(400, "Falta parámetro 'code'")
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    return JSONResponse({
+        "ok": True,
+        "refresh_token": creds.refresh_token,
+        "access_token": creds.token,
+        "expiry": str(creds.expiry),
+        "note": "Copia el refresh_token en /etc/secrets/google-ads.yaml y redeploy."
+    })
+# ------------------------------------------------------
+
 @app.get("/ads/health")
 def ads_health():
-    """Verifica conexión y devuelve lista de cuentas accesibles."""
     try:
         client = _ads_client()
         cust_svc = client.get_service("CustomerService")
@@ -35,7 +81,7 @@ def ads_health():
 def ads_campaigns(
     start: str = Query(..., description="YYYY-MM-DD"),
     end: str = Query(..., description="YYYY-MM-DD"),
-    customer_id: str = Query(None, description="Opcional: si no se pasa, usa el del YAML")
+    customer_id: str | None = Query(None, description="Opcional: si no se pasa, usa el del YAML")
 ):
     try:
         client = _ads_client()
@@ -63,10 +109,14 @@ def ads_campaigns(
                 "campaign_name": r.campaign.name,
                 "impressions": r.metrics.impressions,
                 "clicks": r.metrics.clicks,
-                "cost_micros": r.metrics.cost_micros / 1_000_000  # convertir a moneda
+                "cost": r.metrics.cost_micros / 1_000_000  # moneda
             })
         return {"ok": True, "customer_id": cid, "rows": rows}
     except GoogleAdsException as gae:
         return {"ok": False, "error": gae.failure.message}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "ads-api"}
