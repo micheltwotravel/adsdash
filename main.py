@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from google.ads.googleads.client import GoogleAdsClient
@@ -31,13 +32,13 @@ def _client_config():
 def _ads_client() -> GoogleAdsClient:
     return GoogleAdsClient.load_from_storage(GOOGLE_ADS_YAML_PATH)
 
-def _get_customer_id() -> str:
-    with open(GOOGLE_ADS_YAML_PATH, "r") as fh:
-        cfg = yaml.safe_load(fh) or {}
-    cid = str(cfg.get("client_customer_id") or cfg.get("login_customer_id") or "").strip()
+def _get_customer_id_from_client(client: GoogleAdsClient) -> str:
+    """Lee client_customer_id o login_customer_id desde la configuración del cliente."""
+    cfg = client.configuration
+    cid = (cfg.client_customer_id or cfg.login_customer_id)
     if not cid:
-        raise HTTPException(400, "No se encontró client_customer_id/login_customer_id en google-ads.yaml")
-    return cid.replace("-", "")
+        raise HTTPException(400, "No hay client_customer_id/login_customer_id en la configuración del cliente.")
+    return str(cid).replace("-", "")
 
 # ---------- OAuth para obtener refresh_token ----------
 @app.get("/oauth2/start")
@@ -81,12 +82,12 @@ def ads_health():
 def ads_campaigns(
     start: str = Query(..., description="YYYY-MM-DD"),
     end: str = Query(..., description="YYYY-MM-DD"),
-    customer_id: str | None = Query(None, description="Opcional: si no se pasa, usa el del YAML")
+    customer_id: Optional[str] = Query(None, description="Opcional: si no se pasa, usa el del cliente")
 ):
     try:
         client = _ads_client()
         ga_service = client.get_service("GoogleAdsService")
-        cid = customer_id.replace("-", "") if customer_id else _get_customer_id()
+        cid = customer_id.replace("-", "") if customer_id else _get_customer_id_from_client(client)
 
         query = f"""
             SELECT
@@ -109,11 +110,14 @@ def ads_campaigns(
                 "campaign_name": r.campaign.name,
                 "impressions": r.metrics.impressions,
                 "clicks": r.metrics.clicks,
-                "cost": r.metrics.cost_micros / 1_000_000  # moneda
+                "cost": r.metrics.cost_micros / 1_000_000  # a unidades monetarias
             })
         return {"ok": True, "customer_id": cid, "rows": rows}
     except GoogleAdsException as gae:
-        return {"ok": False, "error": gae.failure.message}
+        # Mensaje más legible desde la API
+        detail = getattr(gae, "failure", None)
+        msg = detail.message if detail and hasattr(detail, "message") else str(gae)
+        return {"ok": False, "error": msg}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -123,15 +127,13 @@ def root():
 
 @app.get("/ads/debug-config")
 def ads_debug_config():
-    import os, yaml
     p = "/etc/secrets/google-ads.yaml"
     exists = os.path.exists(p)
     data = {}
     if exists:
-        with open(p,"r") as f:
+        with open(p, "r") as f:
             data = yaml.safe_load(f) or {}
-    # No devuelvo el token completo por seguridad
-    rt = data.get("refresh_token","")
+    rt = data.get("refresh_token", "")
     masked = (rt[:6] + "..." + rt[-6:]) if rt else ""
     return {
         "path_exists": exists,
