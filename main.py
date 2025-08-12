@@ -4,7 +4,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 from google_auth_oauthlib.flow import Flow
-import os, yaml
+import os
+import yaml
 
 app = FastAPI()
 
@@ -30,10 +31,14 @@ def _client_config():
     }
 
 def _ads_client() -> GoogleAdsClient:
+    # Carga el cliente desde el Secret File
     return GoogleAdsClient.load_from_storage(GOOGLE_ADS_YAML_PATH)
 
 def _get_customer_id_from_client(client: GoogleAdsClient) -> str:
-    """Lee client_customer_id o login_customer_id desde la configuración del cliente."""
+    """
+    Obtiene client_customer_id o login_customer_id desde la configuración del cliente
+    (evita leer YAML manualmente para no topar con strings).
+    """
     cfg = client.configuration
     cid = (cfg.client_customer_id or cfg.login_customer_id)
     if not cid:
@@ -114,7 +119,7 @@ def ads_campaigns(
             })
         return {"ok": True, "customer_id": cid, "rows": rows}
     except GoogleAdsException as gae:
-        # Mensaje más legible desde la API
+        # Mensaje legible desde la API
         detail = getattr(gae, "failure", None)
         msg = detail.message if detail and hasattr(detail, "message") else str(gae)
         return {"ok": False, "error": msg}
@@ -127,12 +132,17 @@ def root():
 
 @app.get("/ads/debug-config")
 def ads_debug_config():
+    """
+    Solo para ver que el archivo existe y tiene claves.
+    No expone el refresh token completo por seguridad.
+    """
     p = "/etc/secrets/google-ads.yaml"
     exists = os.path.exists(p)
     data = {}
     if exists:
         with open(p, "r") as f:
-            data = yaml.safe_load(f) or {}
+            loaded = yaml.safe_load(f)
+            data = loaded if isinstance(loaded, dict) else {}
     rt = data.get("refresh_token", "")
     masked = (rt[:6] + "..." + rt[-6:]) if rt else ""
     return {
@@ -140,4 +150,3 @@ def ads_debug_config():
         "keys_present": sorted(list(data.keys())) if data else [],
         "refresh_token_masked": masked
     }
-
